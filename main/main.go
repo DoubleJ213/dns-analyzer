@@ -23,6 +23,7 @@ type Capture struct {
 	SrcPort  string
 	Record   string
 	AnswerIp string
+	Packet   *gopacket.Packet
 }
 
 func getUserInput() {
@@ -71,37 +72,38 @@ func liveCapture(db *MemDataBuilder, ifaceName string) {
 
 	for packet := range packetSource.Packets() {
 		got := &Capture{}
-		_, status := got.pipeline(packet, udp, dns, ipv4)
-
-		//协程中处理，之前考虑直接调cmdb接口解析vm机器数据
-		//防止其他类型的DataBuilder处理比较慢,导致packet消费太慢，协程没删
-		if status {
+		got.Packet = &packet
+		if got.pipeline(udp, dns, ipv4) {
 			go func(got *Capture) {
+				//协程中处理，之前考虑直接调cmdb接口解析vm机器数据
+				//防止其他类型的DataBuilder处理比较慢,导致packet消费太慢，协程没删
 				db.Analyzer(got)
 			}(got)
 		}
 	}
 }
 
-func udp(packet gopacket.Packet, got *Capture) (gopacket.Packet, bool) {
+func udp(got *Capture) bool {
+	packet := *got.Packet
 	if udpLayer := packet.Layer(layers.LayerTypeUDP); udpLayer != nil {
 		udpp, _ := udpLayer.(*layers.UDP)
 		got.SrcPort = fmt.Sprintf("%s", udpp.DstPort)
-		return packet, true
+		return true
 	}
-	return packet, false
+	return false
 }
 
-func dns(packet gopacket.Packet, got *Capture) (gopacket.Packet, bool) {
+func dns(got *Capture) bool {
+	packet := *got.Packet
 	if dnsLayer := packet.Layer(layers.LayerTypeDNS); dnsLayer != nil {
 		questions := packet.Layer(layers.LayerTypeDNS).(*layers.DNS).Questions
 		if len(questions) != 1 {
-			return nil, false
+			return false
 		}
 		answers := packet.Layer(layers.LayerTypeDNS).(*layers.DNS).Answers
 
 		if len(answers) == 0 {
-			return nil, false
+			return false
 		}
 		var answer []byte
 		var answerIp string
@@ -115,31 +117,31 @@ func dns(packet gopacket.Packet, got *Capture) (gopacket.Packet, bool) {
 
 		got.Record = fmt.Sprintf("%s", answer)
 		got.AnswerIp = fmt.Sprintf("%s", answerIp)
-		return packet, true
+		return true
 	}
-	return packet, false
+	return false
 }
 
-func ipv4(packet gopacket.Packet, got *Capture) (gopacket.Packet, bool) {
+func ipv4(got *Capture) bool {
+	packet := *got.Packet
 	if ipLayer := packet.Layer(layers.LayerTypeIPv4); ipLayer != nil {
 		ip, _ := ipLayer.(*layers.IPv4)
 		got.Src = fmt.Sprintf("%s", ip.DstIP)
-		return packet, true
+		return true
 	}
-	return packet, false
+	return false
 }
 
-type PipeFunc func(gopacket.Packet, *Capture) (gopacket.Packet, bool)
+type PipeFunc func(*Capture) bool
 
-func (got *Capture) pipeline(packet gopacket.Packet, pipeFns ...PipeFunc) (gopacket.Packet, bool) {
+func (got *Capture) pipeline(pipeFns ...PipeFunc) bool {
 	var status bool
 	for i := range pipeFns {
-		_, status = pipeFns[i](packet, got)
-		if status == false {
+		if !pipeFns[i](got) {
 			break
 		}
 	}
-	return packet, status
+	return status
 }
 
 func offlineCapture(filename string) {
